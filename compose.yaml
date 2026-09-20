@@ -1,0 +1,15 @@
+services:
+  chart-api:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      CHART_OUTPUT_DIR: /app/output
+      CHART_SCHEDULER_ENABLED: "1"
+      TZ: Asia/Shanghai
+    volumes:
+      - chart-output:/app/output
+
+volumes:
+  chart-output:

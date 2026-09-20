@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bitcoin-power-law-chart-api"
+version = "1.0.0"
+description = "Public API and scheduled renderer for the Bitcoin power-law chart"
+requires-python = ">=3.9"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "httpx>=0.28,<1",
+  "matplotlib>=3.8,<4",
+  "numpy>=1.26,<3",
+  "pandas>=2.2,<3",
+  "tzdata>=2025.2",
+  "uvicorn[standard]>=0.34,<1",
+  "yfinance>=0.2.66,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.4,<9",
+  "pytest-cov>=6,<8",
+  "ruff>=0.7,<1",
+]
+
+[tool.setuptools]
+packages = ["chart_service"]
+py-modules = ["build_chart"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 88
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["UP007"] # Python 3.9 + FastAPI cannot evaluate PEP 604 response hints.
+
+[tool.ruff.lint.per-file-ignores]
+"build_chart.py" = ["E501", "F841", "I001"]
