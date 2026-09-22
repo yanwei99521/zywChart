@@ -255,8 +255,19 @@ def create_app(
         )
         service = os.getenv("CHART_SERVICE_NAME", "zywChart")
         try:
+            # Stop, wait for the old process to release its log-file handles,
+            # then start. A bare `nssm restart` stops and starts back-to-back;
+            # if the old worker hasn't freed C:\Users\...\zywChart_svc.log yet
+            # the new instance fails with ERROR_SHARING_VIOLATION
+            # ("另一个程序正在使用此文件"). Splitting with a short pause avoids
+            # that overlap. The detached cmd survives this worker being stopped.
+            cmd = (
+                f'"{nssm}" stop {service} '
+                f"&& timeout /t 2 /nobreak >nul "
+                f'&& "{nssm}" start {service}'
+            )
             subprocess.Popen(
-                [nssm, "restart", service],
+                ["cmd.exe", "/c", cmd],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 close_fds=True,
