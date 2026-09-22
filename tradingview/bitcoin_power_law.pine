@@ -1,0 +1,59 @@
+//@version=5
+// -----------------------------------------------------------------------------
+// Bitcoin 幂律通道 · zywChart
+//
+// 数据来源：GET http://<host>:9020/api/v1/charts/bitcoin-power-law/dataset.json
+//
+// 使用方式（二选一）：
+//   1) 直接粘贴本文件：把下面的 Slope / Intercept 默认值换成 dataset.json 里
+//      model.slope 与 model.intercept 的值（本文件顶部注释会标注对应字段）。
+//   2) 自动生成：运行 `python tools/export_pine.py`，会把当前拟合出的真实参数
+//      注入并生成 tradingview/bitcoin_power_law.generated.pine，直接粘贴即可。
+//
+// 说明：TradingView 不能直接导入 JSON，但幂律通道只依赖三个数：
+//       genesis(2009-01-03) + slope + intercept
+//   即 price = exp(intercept) * days_since_genesis ^ slope
+//   通道上下轨为 trend * exp(±1)（即中枢 ÷ e 与 中枢 × e）。
+//   BTC 与黄金价格由 TradingView 自己的行情源提供（无需内嵌历史数据）。
+// -----------------------------------------------------------------------------
+indicator(
+     "Bitcoin Power Law (zywChart)",
+     shorttitle="BTC 幂律",
+     overlay=true,
+     timeframe="W",
+     format=format.price,
+     precision=2
+     )
+
+// ===== 1. 模型参数（对应 dataset.json -> model）=====
+genesisInput    = input.time(timestamp("2009-01-03 00:00:00 +0000"), "幂律起点 Genesis")
+slopeInput      = input.float({{SLOPE}}, "Slope 斜率（model.slope）", step=0.0001)
+interceptInput  = input.float({{INTERCEPT}}, "Intercept 截距（model.intercept）", step=0.0001)
+bandInput       = input.float(1.0, "通道宽度（ln 倍数）", minval=0.1, maxval=2.0, step=0.05)
+
+// ===== 2. 幂律中枢 / 支撑 / 阻力 =====
+days       = math.max((time - genesisInput) / 86400000.0, 1.0)
+trend      = math.exp(interceptInput) * math.pow(days, slopeInput)
+support    = trend / math.exp(bandInput)
+resistance = trend * math.exp(bandInput)
+
+pResistance = plot(resistance, "幂律阻力线 (trend × e)", color=color.new(#c9974b, 0), linewidth=1)
+pTrend      = plot(trend,      "幂律中枢线",             color=#28d8dc,               linewidth=2)
+pSupport    = plot(support,    "幂律支撑线 (trend ÷ e)", color=color.new(#c9974b, 0), linewidth=1)
+fill(pResistance, pSupport, color=color.new(#39e8e4, 90), title="幂律通道")
+
+// ===== 3. 独立窗格：模型偏离 与 BTC/黄金 52 周 Z-score =====
+// 100 * ln(收盘价 / 幂律中枢)，dataset 中对应 series.btc_vs_power_law_pct
+deviation = 100.0 * math.log(close / trend)
+
+goldSymbol = input.symbol("OANDA:XAUUSD", "黄金代码（现货 XAU/USD）")
+gold = request.security(goldSymbol, "W", close, barmerge.gaps_off, barmerge.lookahead_off)
+ratio = close / gold
+// 对应 dataset 中 series.btc_gold_ratio_52w_zscore_pct
+zscore = (ratio - ta.sma(ratio, 52)) / ta.stdev(ratio, 52) * 100.0
+
+plot(deviation, "BTC 相对幂律偏离 %", color=color.new(#35ef4f, 0), display=display.pane)
+plot(zscore,    "BTC/黄金 52周 Z-score", color=color.new(#d92acf, 0), display=display.pane)
+hline(0,   "中位",  color=color.new(#888888, 0),  display=display.pane)
+hline(100, "+1σ",   color=color.new(#d92acf, 60), linestyle=hline.style_dotted, display=display.pane)
+hline(-100, "-1σ",  color=color.new(#d92acf, 60), linestyle=hline.style_dotted, display=display.pane)

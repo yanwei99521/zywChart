@@ -23,6 +23,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 
+from chart_service.dataset import build_dataset
 from chart_service.refresh import gold_source, refresh_chart, was_gold_stale
 from chart_service.scheduler import (
     REFRESH_WEEKDAY,
@@ -282,6 +283,40 @@ def create_app(
                 }
             },
             headers=CACHE_HEADERS,
+        )
+
+    @application.get("/api/v1/charts/bitcoin-power-law/dataset")
+    @application.get("/api/v1/charts/bitcoin-power-law/dataset.json")
+    def dataset(pretty: bool = False, download: bool = False) -> Response:
+        """Everything needed to redraw the chart elsewhere, as one JSON document.
+
+        Contains the weekly inputs (BTC, gold, ratio, z-score, power-law
+        deviation), the fitted power-law parameters and the pre-computed trend /
+        support / resistance curves out to 2030. Timestamps are UNIX seconds in
+        UTC - the unit TradingView expects - so a consumer can plot the same
+        picture without calling our providers. See ``tradingview/`` for a Pine
+        Script template that consumes this payload.
+        """
+        try:
+            payload = build_dataset(repository.root)
+        except FileNotFoundError:
+            return unavailable("Chart data has not been generated yet")
+        except ValueError as error:
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error": {"code": "dataset_unavailable", "message": str(error)}
+                },
+            )
+        headers = dict(CACHE_HEADERS)
+        if download:
+            headers["Content-Disposition"] = (
+                'attachment; filename="bitcoin-power-law-dataset.json"'
+            )
+        return Response(
+            content=json.dumps(payload, ensure_ascii=False, indent=2 if pretty else None),
+            media_type="application/json; charset=utf-8",
+            headers=headers,
         )
 
     @application.post("/api/v1/charts/bitcoin-power-law/refresh")

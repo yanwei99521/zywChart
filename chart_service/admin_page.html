@@ -70,6 +70,10 @@
     }
     button:disabled { opacity: .55; cursor: not-allowed; }
     button.secondary { background: #2563eb; }
+    .link-btn {
+      display: inline-block; background: #0f766e; color: #fff; text-decoration: none;
+      border-radius: 8px; padding: 11px 20px; font-size: 14px; font-weight: 600;
+    }
     .busy { color: var(--muted); font-size: 13px; }
     .hint { color: var(--muted); font-size: 12px; margin: 0 4px; }
     .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
@@ -152,13 +156,16 @@
     <section class="card actions">
       <button id="refresh-btn">强制刷新数据并重绘</button>
       <button id="restart-btn" class="secondary">重启服务</button>
+      <a class="link-btn" href="/api/v1/charts/bitcoin-power-law/dataset.json?download=true"
+         target="_blank" rel="noopener">下载数据集 JSON</a>
       <span class="busy" id="busy"></span>
       <span class="hint">「强制刷新」立即重绘；「重启服务」会让进程退出并由 nssm 重新拉起（用于加载新代码），期间约 10–30 秒不可用。</span>
     </section>
 
     <p class="hint">
       说明：该后台页面不鉴权，当前仅适合在本地 / 内网访问。若服务暴露至公网，请为
-      <code>/admin</code> 与 <code>/refresh</code> 增加访问控制。图表由定时任务每周一 07:00（Asia/Shanghai）自动刷新，也可用下方按钮立即刷新。
+      <code>/admin</code> 与 <code>/refresh</code> 增加访问控制。图表由定时任务每周一 07:00（Asia/Shanghai）自动刷新，也可用上方按钮立即刷新。
+      对外数据：访问 <code>/api/v1/charts/bitcoin-power-law/dataset.json</code> 可拿到绘制该图所需的全部数据（周线序列 + 幂律模型参数，时间戳为 UTC 秒），供 TradingView 等外部工具按同样格式重绘。
     </p>
   </main>
 
