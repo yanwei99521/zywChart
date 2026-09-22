@@ -22,7 +22,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 
-from chart_service.refresh import refresh_chart
+from chart_service.refresh import refresh_chart, was_gold_stale
 from chart_service.scheduler import (
     RUN_TIMES,
     SHANGHAI_TZ,
@@ -90,9 +90,15 @@ def create_app(
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         task: Optional[asyncio.Task[None]] = None
         if scheduler_enabled:
+
+            def _scheduled_refresh() -> dict[str, object]:
+                result = refresh_chart(repository.root)
+                refresh_state.gold_stale = was_gold_stale()
+                return result
+
             task = asyncio.create_task(
                 run_scheduler(
-                    lambda: refresh_chart(repository.root),
+                    _scheduled_refresh,
                     refresh_state,
                     run_immediately=_needs_refresh(repository),
                 )
@@ -224,8 +230,15 @@ def create_app(
             )
         refresh_state.last_success_at = datetime.now(ZoneInfo(SHANGHAI_TZ)).isoformat()
         refresh_state.last_error = None
+        refresh_state.gold_stale = was_gold_stale()
         return JSONResponse(
-            content={"data": {"refreshed": True, "summary": result}},
+            content={
+                "data": {
+                    "refreshed": True,
+                    "gold_stale": was_gold_stale(),
+                    "summary": result,
+                }
+            },
             headers=CACHE_HEADERS,
         )
 
