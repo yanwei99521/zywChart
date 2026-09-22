@@ -18,6 +18,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
+import pandas as pd
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
@@ -200,6 +201,82 @@ def create_app(
             media_type="text/csv; charset=utf-8",
             filename="bitcoin-power-law-weekly-data.csv",
             content_disposition_type="attachment",
+            headers=CACHE_HEADERS,
+        )
+
+    @application.get("/api/v1/charts/bitcoin-power-law/recent")
+    def recent_prices(limit: int = 50) -> JSONResponse:
+        """Return the most recent weekly rows (BTC + gold) newest first.
+
+        Each row also carries week-over-week percentage changes so an operator
+        can spot a frozen/stale feed (gold repeating an identical value because
+        Yahoo was rate-limited and we fell back to the cached series) or an
+        outlier BTC print at a glance.
+        """
+        limit = max(1, min(int(limit), 500))
+        if not repository.data.is_file():
+            return unavailable("Chart data has not been generated yet")
+        try:
+            frame = pd.read_csv(repository.data, parse_dates=["week_ending"])
+        except Exception as exc:  # corrupt or unreadable CSV should not 500
+            LOGGER.warning("Could not read weekly data: %s", exc)
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "error": {
+                        "code": "data_unreadable",
+                        "message": f"Could not read weekly data: {exc}",
+                    }
+                },
+            )
+        if frame.empty:
+            return unavailable("Chart data has not been generated yet")
+
+        frame = frame.sort_values("week_ending")
+        btc = pd.to_numeric(frame.get("btc_usd"), errors="coerce")
+        gold = pd.to_numeric(frame.get("gold_usd_oz"), errors="coerce")
+        btc_wow = btc.pct_change() * 100.0
+        gold_wow = gold.pct_change() * 100.0
+
+        def cell(value: object) -> Optional[float]:
+            if value is None or pd.isna(value):
+                return None
+            return float(value)
+
+        rows: list[dict[str, object]] = []
+        for position in range(len(frame) - 1, -1, -1):
+            if len(rows) >= limit:
+                break
+            record = frame.iloc[position]
+            week = record["week_ending"]
+            rows.append(
+                {
+                    "week_ending": pd.Timestamp(week).date().isoformat(),
+                    "btc_usd": cell(record.get("btc_usd")),
+                    "btc_wow_pct": cell(btc_wow.iloc[position]),
+                    "gold_usd_oz": cell(record.get("gold_usd_oz")),
+                    "gold_wow_pct": cell(gold_wow.iloc[position]),
+                    "btc_gold_ratio": cell(record.get("btc_gold_ratio")),
+                    "btc_gold_52w_zscore_pct": cell(
+                        record.get("btc_gold_52w_zscore_pct")
+                    ),
+                }
+            )
+
+        return JSONResponse(
+            content={
+                "data": {
+                    "count": len(rows),
+                    "limit": limit,
+                    "total_weeks": int(len(frame)),
+                    "gold_source": gold_source(),
+                    "gold_stale": was_gold_stale(),
+                    "updated_at": datetime.fromtimestamp(
+                        repository.data.stat().st_mtime
+                    ).isoformat(timespec="seconds"),
+                    "rows": rows,
+                }
+            },
             headers=CACHE_HEADERS,
         )
 
