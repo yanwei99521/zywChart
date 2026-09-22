@@ -212,15 +212,15 @@ def draw_chart(
     data.to_csv(output_dir / "data" / "weekly_model_data.csv", float_format="%.8f")
 
     chosen_font = resolve_cjk_font()
-    font_stack = ([chosen_font] if chosen_font else []) + [
-        name for name in CJK_FONT_CANDIDATES if name != chosen_font
-    ]
     if chosen_font is None:
         print("warning: no CJK-capable font found; Chinese labels may render as boxes")
+        font_stack = list(CJK_FONT_CANDIDATES)
+    else:
+        font_stack = [chosen_font]
     plt.rcParams.update(
         {
             "font.family": font_stack,
-            "font.sans-serif": list(CJK_FONT_CANDIDATES),
+            "font.sans-serif": list(font_stack),
             "axes.unicode_minus": False,
             "figure.facecolor": COLORS["bg"],
             "axes.facecolor": COLORS["bg"],
