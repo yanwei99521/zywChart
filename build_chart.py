@@ -411,7 +411,7 @@ def draw_chart(
     )
     fig.text(
         0.5,
-        0.936,
+        0.928,
         f"比特币幂律与 BTC/黄金 52 周 Z-score · 数据截至 {current_date:%Y-%m-%d}",
         ha="center",
         fontsize=11,
