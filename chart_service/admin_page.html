@@ -69,6 +69,7 @@
       transition: opacity .15s ease;
     }
     button:disabled { opacity: .55; cursor: not-allowed; }
+    button.secondary { background: #2563eb; }
     .busy { color: var(--muted); font-size: 13px; }
     .hint { color: var(--muted); font-size: 12px; margin: 0 4px; }
     .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
@@ -99,8 +100,9 @@
 
     <section class="card actions">
       <button id="refresh-btn">强制刷新数据并重绘</button>
+      <button id="restart-btn" class="secondary">重启服务</button>
       <span class="busy" id="busy"></span>
-      <span class="hint">点击后立即拉取 BTC + 黄金最新数据并重绘，无需等待整点定时任务。</span>
+      <span class="hint">「强制刷新」立即重绘；「重启服务」会让进程退出并由 nssm 重新拉起（用于加载新代码），期间约 10–30 秒不可用。</span>
     </section>
 
     <p class="hint">
@@ -206,7 +208,55 @@
       }
     }
 
+    const RESTART = "/api/v1/admin/restart";
+    const restartBtn = document.getElementById("restart-btn");
+
+    async function waitForService(timeoutMs) {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        try {
+          const res = await fetch(HEALTH, { cache: "no-store" });
+          if (res.ok) {
+            const j = await res.json();
+            if (j.data && j.data.status === "ok") return true;
+          }
+        } catch (e) { /* service down, keep waiting */ }
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+      return false;
+    }
+
+    async function doRestart() {
+      if (!confirm("确定重启服务？重启期间（约 10–30 秒）图表与接口将暂时不可用。")) return;
+      btn.disabled = true;
+      restartBtn.disabled = true;
+      busy.textContent = "正在重启服务，等待进程重新拉起…";
+      errorBox.classList.add("hidden");
+      // 触发重启；无论 POST 是否返回（服务可能在响应前被停止），都进入探测循环。
+      try {
+        await fetch(RESTART, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        });
+      } catch (e) { /* 服务可能在响应前被停止，忽略网络错误 */ }
+      const ok = await waitForService(45000);
+      if (ok) {
+        busy.textContent = "服务已重启 ✓";
+        await loadStatus();
+        setChart();
+      } else {
+        busy.textContent = "";
+        errorBox.textContent = "重启后服务未能在 45 秒内恢复，请检查 nssm 状态。";
+        errorBox.classList.remove("hidden");
+      }
+      btn.disabled = false;
+      restartBtn.disabled = false;
+      setTimeout(() => { if (busy.textContent === "服务已重启 ✓") busy.textContent = ""; }, 4000);
+    }
+
     btn.addEventListener("click", doRefresh);
+    restartBtn.addEventListener("click", doRestart);
     (async () => {
       await loadStatus();
       setChart();

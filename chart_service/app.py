@@ -7,6 +7,8 @@ import json
 import logging
 import os
 import re
+import subprocess
+import sys
 
 LOGGER = logging.getLogger(__name__)
 from collections.abc import AsyncIterator
@@ -224,6 +226,57 @@ def create_app(
         refresh_state.last_error = None
         return JSONResponse(
             content={"data": {"refreshed": True, "summary": result}},
+            headers=CACHE_HEADERS,
+        )
+
+    @application.post("/api/v1/admin/restart", include_in_schema=False)
+    async def restart_service() -> JSONResponse:
+        """Restart the Windows service hosting this app (self-restart).
+
+        The service runs as LocalSystem, which is permitted to talk to the SCM,
+        so we can ask nssm to restart the service from inside the worker. We
+        spawn nssm *detached* and do not wait: the restart stops this very
+        process, so blocking would hang the request. The caller should poll
+        /health until the service returns. Returns 501 on non-Windows hosts.
+        """
+        if sys.platform != "win32":
+            return JSONResponse(
+                status_code=501,
+                content={
+                    "error": {
+                        "code": "unsupported_platform",
+                        "message": "Service restart is only available on Windows",
+                    }
+                },
+                headers=CACHE_HEADERS,
+            )
+        nssm = os.getenv(
+            "CHART_NSSM_PATH", r"D:\akshare\nssm\nssm-2.24\win64\nssm.exe"
+        )
+        service = os.getenv("CHART_SERVICE_NAME", "zywChart")
+        try:
+            subprocess.Popen(
+                [nssm, "restart", service],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+                creationflags=subprocess.DETACHED_PROCESS
+                | subprocess.CREATE_NEW_PROCESS_GROUP,
+            )
+        except FileNotFoundError:
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "error": {
+                        "code": "nssm_missing",
+                        "message": f"nssm executable not found at {nssm}",
+                    }
+                },
+                headers=CACHE_HEADERS,
+            )
+        LOGGER.info("Service restart requested via /admin (nssm restart %s)", service)
+        return JSONResponse(
+            content={"data": {"restarting": True, "service": service}},
             headers=CACHE_HEADERS,
         )
 
