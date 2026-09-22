@@ -5,3 +5,5 @@
 __pycache__/
 *.py[cod]
 .chart-refresh-*/
+.workbuddy/
+data/gold_cache.csv

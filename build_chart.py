@@ -1,5 +1,19 @@
 #!/usr/bin/env python3
-"""Build a data-driven recreation of the Bitcoin power-law chart."""
+"""Build a data-driven recreation of the Bitcoin power-law chart.
+
+The rules implemented here follow the reference front-end implementation
+(``bitcoin-power-law.ts``):
+
+*weekly bars*   daily closes are bucketed into weeks that end on Sunday
+                (pandas ``W-SUN``), keeping the last observation of the week.
+*power law*     ordinary least squares on ``ln(days since 2009-01-03)`` vs
+                ``ln(price)`` over the full BTC history.
+*corridor*      trend = ``exp(intercept) * days ** slope``; support is
+                ``trend / e`` and resistance ``trend * e``.
+*deviation*     ``100 * ln(price / trend)`` (log deviation, in percent).
+*z-score*       the BTC/gold ratio against its own trailing 52 week mean,
+                using the **sample** standard deviation (ddof=1), scaled by 100.
+"""
 
 from __future__ import annotations
 
@@ -9,12 +23,39 @@ from pathlib import Path
 
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
-from matplotlib.ticker import FuncFormatter, LogLocator, MultipleLocator
+from matplotlib.ticker import FuncFormatter
 import numpy as np
 import pandas as pd
 
 
 GENESIS = pd.Timestamp("2009-01-03")
+
+# Reference layout: the price panel spans 2009-01-01 .. 2030 and the oscillator
+# panel is clipped to +/-140, mirroring the SVG the front-end renders.
+CHART_START = pd.Timestamp("2009-01-01")
+CHART_END = pd.Timestamp("2030-12-31")
+PRICE_FLOOR = 0.1
+PRICE_CEILING_MIN = 1_000_000.0
+OSC_LIMIT = 140.0
+ZSCORE_WINDOW = 52
+
+# Palette taken from the reference SVG so both renderings look like one chart.
+COLORS = {
+    "bg": "#ffffff",
+    "grid": "#edf1f3",
+    "btc": "#17242b",
+    "trend": "#20cbd3",
+    "support": "#d7b46b",
+    "band": "#42e9ef",
+    "deviation": "#28ef4e",
+    "zscore": "#d91bd1",
+    "zero": "#aeb8bf",
+    "title": "#60666c",
+    "subtitle": "#76808a",
+    "axis": "#70777d",
+    "foot": "#8a9298",
+    "legend": "#4e5962",
+}
 
 # Fonts able to render the Chinese labels used throughout the chart, most
 # preferred first. The previous list only held macOS fonts, so on Windows
@@ -86,7 +127,8 @@ def read_gold_yfinance(path: Path) -> pd.Series:
 
 
 def power_law_fit(btc: pd.Series) -> tuple[float, float]:
-    days = (btc.index - GENESIS).days.to_numpy(dtype=float)
+    """OLS of ln(price) on ln(days since genesis); days are floored at 1."""
+    days = np.maximum((btc.index - GENESIS).days.to_numpy(dtype=float), 1.0)
     slope, intercept = np.polyfit(np.log(days), np.log(btc.to_numpy()), 1)
     return float(slope), float(intercept)
 
@@ -96,20 +138,32 @@ def model_values(index: pd.DatetimeIndex, slope: float, intercept: float) -> np.
     return np.exp(intercept) * np.power(days, slope)
 
 
+def ratio_zscore(ratio: pd.Series, window: int = ZSCORE_WINDOW) -> pd.Series:
+    """Z-score of the BTC/gold ratio vs its trailing window (x100).
+
+    Uses the sample standard deviation (ddof=1) and starts as soon as two
+    observations exist, matching the reference implementation.
+    """
+    rolling = ratio.rolling(window, min_periods=2)
+    z = (ratio - rolling.mean()) / rolling.std(ddof=1)
+    return (z * 100.0).replace([np.inf, -np.inf], np.nan)
+
+
 def money(value: float, _position: float | None = None) -> str:
     if value >= 1_000_000:
         return f"${value / 1_000_000:.0f}M"
-    if value >= 1_000:
-        return f"${value:,.0f}"
     if value >= 1:
         return f"${value:,.0f}"
     return f"${value:.2f}"
 
 
-def cycle_extreme(series: pd.Series, start: str, end: str, kind: str) -> tuple[pd.Timestamp, float]:
-    window = series.loc[start:end]
-    when = window.idxmax() if kind == "max" else window.idxmin()
-    return when, float(window.loc[when])
+def price_tick(value: float, _position: float | None = None) -> str:
+    """Axis-tick label: whole dollars above $1, decimals below."""
+    if value >= 1_000_000:
+        return f"${value / 1_000_000:g}M"
+    if value >= 1:
+        return f"${value:,.0f}"
+    return f"${value:g}"
 
 
 def draw_chart(
@@ -117,13 +171,17 @@ def draw_chart(
     gold: pd.Series,
     output_dir: Path,
     as_of: pd.Timestamp,
-    gold_label: str = "Yahoo Finance COMEX Gold (GC=F)",
+    gold_label: str = "LBMA Gold Price PM（USD/盎司）",
 ) -> dict[str, float]:
-    btc = btc.loc[:as_of]
-    gold = gold.loc[:as_of]
+    btc = btc.loc[:as_of].dropna().sort_index()
+    gold = gold.loc[:as_of].dropna().sort_index()
+    if len(btc) < 2:
+        raise ValueError("at least two BTC observations are required to fit the model")
+
     slope, intercept = power_law_fit(btc)
 
-    future_index = pd.date_range(GENESIS + pd.Timedelta(days=120), "2030-12-31", freq="W-SUN")
+    # Corridor: draw from the first observation out to 2030 like the reference.
+    future_index = pd.date_range(btc.index.min(), CHART_END, freq="W-SUN")
     trend_future = model_values(future_index, slope, intercept)
     support_future = trend_future / np.e
     upper_future = trend_future * np.e
@@ -131,12 +189,12 @@ def draw_chart(
     trend_hist = pd.Series(model_values(btc.index, slope, intercept), index=btc.index)
     oscillator = 100.0 * np.log(btc / trend_hist)
 
+    # Gold is aligned on the exact week-ending Sunday; weeks without a gold
+    # print simply have no ratio (no forward filling), as in the reference.
     aligned = pd.concat([btc.rename("btc_usd"), gold.rename("gold_usd_oz")], axis=1).sort_index()
-    aligned["gold_usd_oz"] = aligned["gold_usd_oz"].ffill(limit=2)
     aligned = aligned.dropna()
     ratio = aligned["btc_usd"] / aligned["gold_usd_oz"]
-    ratio_z = (ratio - ratio.rolling(52).mean()) / ratio.rolling(52).std(ddof=0)
-    ratio_z = ratio_z * 100.0
+    ratio_z = ratio_zscore(ratio)
 
     data = pd.concat(
         [
@@ -164,180 +222,189 @@ def draw_chart(
             "font.family": font_stack,
             "font.sans-serif": list(CJK_FONT_CANDIDATES),
             "axes.unicode_minus": False,
-            "figure.facecolor": "#fbfbfa",
-            "axes.facecolor": "#fbfbfa",
-            "savefig.facecolor": "#fbfbfa",
+            "figure.facecolor": COLORS["bg"],
+            "axes.facecolor": COLORS["bg"],
+            "savefig.facecolor": COLORS["bg"],
         }
     )
 
-    fig = plt.figure(figsize=(18, 10.5), dpi=150)
-    grid = fig.add_gridspec(2, 1, height_ratios=[1.65, 1.0], hspace=0.0)
+    fig = plt.figure(figsize=(13.6, 9.0), dpi=160)
+    grid = fig.add_gridspec(2, 1, height_ratios=[2.2, 1.0], hspace=0.09)
     ax = fig.add_subplot(grid[0])
     ax_bottom = fig.add_subplot(grid[1], sharex=ax)
 
-    # A layered cyan corridor approximates the soft model glow in the reference.
-    band_levels = np.linspace(-1.0, 1.0, 17)
-    for low, high in zip(band_levels[:-1], band_levels[1:]):
-        alpha = 0.018 + 0.022 * (1.0 - abs((low + high) / 2.0))
+    ceiling = max(PRICE_CEILING_MIN, float(np.max(upper_future)) * 1.05)
+    ax.set_yscale("log")
+    ax.set_ylim(PRICE_FLOOR, ceiling)
+    ax.set_xlim(CHART_START, CHART_END)
+
+    # Corridor: one vertical gradient from trend*e (top, .34) to trend/e (.04).
+    levels = np.linspace(1.0, -1.0, 25)
+    for high, low in zip(levels[:-1], levels[1:]):
+        middle = (high + low) / 2.0
+        alpha = 0.04 + 0.30 * (middle + 1.0) / 2.0
         ax.fill_between(
             future_index,
             trend_future * np.exp(low),
             trend_future * np.exp(high),
-            color="#39e8e4",
+            color=COLORS["band"],
             alpha=alpha,
             linewidth=0,
             zorder=0,
         )
 
-    ax.plot(future_index, trend_future, color="#28d8dc", lw=1.4, ls=(0, (2, 2)), label="幂律中枢线")
-    ax.plot(future_index, support_future, color="#c9974b", lw=1.3, alpha=0.9, label="幂律支撑线（中枢 ÷ e）")
-    ax.plot(btc.index, btc.values, color="#171717", lw=1.35, label="比特币周价", zorder=5)
+    ax.plot(
+        future_index,
+        trend_future,
+        color=COLORS["trend"],
+        lw=1.5,
+        ls=(0, (3, 3)),
+        label="幂律趋势线",
+        zorder=3,
+    )
+    ax.plot(
+        future_index,
+        support_future,
+        color=COLORS["support"],
+        lw=1.2,
+        label="幂律支撑线（中枢 ÷ e）",
+        zorder=3,
+    )
+    ax.plot(
+        btc.index,
+        btc.values,
+        color=COLORS["btc"],
+        lw=1.45,
+        label="比特币周价",
+        zorder=5,
+    )
 
-    ax.set_yscale("log")
-    ax.set_ylim(0.02, 4_000_000)
-    ax.set_xlim(pd.Timestamp("2009-01-01"), pd.Timestamp("2030-12-31"))
-    ax.yaxis.set_major_locator(LogLocator(base=10, numticks=10))
-    ax.yaxis.set_major_formatter(FuncFormatter(money))
-    ax.grid(which="major", color="#d7d7d4", lw=0.7, alpha=0.5)
-    ax.grid(which="minor", color="#e8e8e5", lw=0.45, alpha=0.35)
+    ticks = [0.1, 1, 10, 100, 1_000, 10_000, 100_000, 1_000_000]
+    ticks = [tick for tick in ticks if PRICE_FLOOR <= tick <= ceiling]
+    ax.set_yticks(ticks)
+    ax.set_yticklabels([price_tick(tick) for tick in ticks], color=COLORS["axis"], fontsize=10)
+    ax.grid(which="major", color=COLORS["grid"], lw=0.8)
     ax.tick_params(axis="x", labelbottom=False)
-    ax.tick_params(axis="y", colors="#686866", labelsize=10)
-    ax.set_ylabel("比特币价格（美元，对数刻度）", color="#4d4d4b", fontsize=11)
+    ax.tick_params(axis="y", colors=COLORS["axis"], labelsize=10)
+    ax.set_ylabel("比特币价格（美元，对数刻度）", color="#4e5962", fontsize=10)
 
     current_date = btc.index[-1]
     current_price = float(btc.iloc[-1])
     current_trend = float(trend_hist.iloc[-1])
     current_support = current_trend / np.e
     current_osc = float(oscillator.iloc[-1])
-    current_z = float(ratio_z.dropna().iloc[-1])
-    current_gold = float(aligned["gold_usd_oz"].iloc[-1])
-
-    ax.axhline(60_000, color="#202020", lw=0.9, ls=(0, (3, 2)), alpha=0.75)
-    ax.text(pd.Timestamp("2011-08-01"), 70_000, "关键观察位：$60k", fontsize=10, color="#202020")
+    current_gold = float(aligned["gold_usd_oz"].iloc[-1]) if len(aligned) else float("nan")
+    ratio_z_clean = ratio_z.dropna()
+    current_z = float(ratio_z_clean.iloc[-1]) if len(ratio_z_clean) else float("nan")
 
     ax.annotate(
-        f"现价  {money(current_price)}",
+        money(current_price),
         xy=(current_date, current_price),
-        xytext=(24, 12),
+        xytext=(8, -4),
         textcoords="offset points",
         fontsize=11,
         color="#111111",
-        arrowprops={"arrowstyle": "-", "color": "#444444", "lw": 0.8},
+        weight="bold",
     )
     ax.annotate(
-        f"幂律中枢  {money(current_trend)}",
+        money(current_trend),
         xy=(current_date, current_trend),
-        xytext=(24, 6),
+        xytext=(8, 12),
         textcoords="offset points",
         fontsize=10,
-        color="#149da1",
+        color="#12aeb6",
     )
     ax.annotate(
-        f"模型支撑  {money(current_support)}",
+        money(current_support),
         xy=(current_date, current_support),
-        xytext=(24, -17),
+        xytext=(8, -14),
         textcoords="offset points",
         fontsize=10,
-        color="#a66f24",
+        color="#b8862e",
     )
-
-    cycles = [
-        ("2011-01-01", "2011-07-01", "2011-07-01", "2012-01-31"),
-        ("2013-01-01", "2014-01-31", "2014-01-01", "2015-06-30"),
-        ("2016-01-01", "2018-01-31", "2018-01-01", "2019-06-30"),
-        ("2020-01-01", "2022-01-31", "2022-01-01", "2023-06-30"),
-        ("2024-01-01", "2026-01-31", "2025-10-01", str(as_of.date())),
-    ]
-    for peak_start, peak_end, trough_start, trough_end in cycles:
-        peak_date, peak = cycle_extreme(btc, peak_start, peak_end, "max")
-        trough_date, trough = cycle_extreme(btc, trough_start, trough_end, "min")
-        drawdown = (trough / peak - 1.0) * 100.0
-        ax.annotate(
-            f"{money(peak)}",
-            xy=(peak_date, peak),
-            xytext=(0, 12),
-            textcoords="offset points",
-            ha="center",
-            fontsize=9.5,
-            color="#111111",
-        )
-        ax.annotate(
-            f"{drawdown:.0f}%",
-            xy=(trough_date, trough),
-            xytext=(0, -23),
-            textcoords="offset points",
-            ha="center",
-            fontsize=9.5,
-            color="#111111",
-            arrowprops={"arrowstyle": "-|>", "color": "#303030", "lw": 0.8},
-        )
 
     handles, labels = ax.get_legend_handles_labels()
     order = [2, 0, 1]
     ax.legend(
         [handles[i] for i in order],
         [labels[i] for i in order],
-        loc="lower right",
-        bbox_to_anchor=(0.985, 0.04),
+        loc="upper left",
+        bbox_to_anchor=(0.012, 0.965),
         frameon=False,
-        fontsize=10.5,
+        fontsize=9.5,
+        labelcolor=COLORS["legend"],
     )
 
-    green = oscillator.reindex(btc.index)
-    magenta = ratio_z.reindex(btc.index).interpolate(limit=2)
-    ax_bottom.fill_between(green.index, 0, green.values, color="#35ef4f", alpha=0.92, linewidth=0, label="BTC 相对幂律偏离")
-    ax_bottom.fill_between(magenta.index, 0, magenta.values, color="#d92acf", alpha=0.82, linewidth=0, label="BTC/黄金 52周 Z-score")
-    ax_bottom.axhline(0, color="#8a8a87", lw=0.8, alpha=0.8)
-    ax_bottom.set_ylim(-140, 120)
-    ax_bottom.yaxis.set_major_locator(MultipleLocator(20))
-    ax_bottom.yaxis.set_major_formatter(FuncFormatter(lambda value, _pos: f"{value:.0f}%"))
+    ax_bottom.fill_between(
+        oscillator.index,
+        0,
+        oscillator.values,
+        color=COLORS["deviation"],
+        alpha=0.82,
+        linewidth=0,
+        label="BTC vs 幂律",
+    )
+    ax_bottom.fill_between(
+        ratio_z.index,
+        0,
+        ratio_z.values,
+        color=COLORS["zscore"],
+        alpha=0.78,
+        linewidth=0,
+        label="BTC/黄金 52周 Z-score",
+    )
+    ax_bottom.axhline(0, color=COLORS["zero"], lw=0.9, ls=(0, (3, 3)))
+    ax_bottom.set_ylim(-OSC_LIMIT, OSC_LIMIT)
+    ax_bottom.set_yticks([-140, -70, 0, 70, 140])
+    ax_bottom.yaxis.set_major_formatter(FuncFormatter(lambda value, _pos: f"{value:.0f}"))
     ax_bottom.yaxis.tick_right()
     ax_bottom.yaxis.set_label_position("right")
-    ax_bottom.tick_params(axis="y", colors="#686866", labelsize=9)
+    ax_bottom.tick_params(axis="y", colors=COLORS["axis"], labelsize=9)
+    ax_bottom.set_ylabel("偏离 / Z-score", color="#4e5962", fontsize=9)
     ax_bottom.xaxis.set_major_locator(mdates.YearLocator(1))
     ax_bottom.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
-    ax_bottom.tick_params(axis="x", colors="#686866", labelsize=9)
-    ax_bottom.grid(which="major", color="#d7d7d4", lw=0.7, alpha=0.45)
-    ax_bottom.legend(loc="upper right", bbox_to_anchor=(0.985, 0.98), frameon=False, fontsize=10.5)
-
-    ax_bottom.annotate(
-        f"最新：幂律偏离 {current_osc:.0f}%  |  BTC/黄金 Z-score {current_z:.0f}%",
-        xy=(current_date, current_osc),
-        xytext=(-8, -30),
-        textcoords="offset points",
-        ha="right",
+    ax_bottom.tick_params(axis="x", colors=COLORS["axis"], labelsize=9)
+    ax_bottom.grid(which="major", color=COLORS["grid"], lw=0.8)
+    ax_bottom.legend(
+        loc="upper left",
+        bbox_to_anchor=(0.012, 0.97),
+        frameon=False,
         fontsize=9.5,
-        color="#4c4c49",
+        labelcolor=COLORS["legend"],
     )
 
     for axis in (ax, ax_bottom):
         axis.spines["top"].set_visible(False)
-        axis.spines["left"].set_color("#c9c9c6")
-        axis.spines["right"].set_color("#c9c9c6")
-        axis.spines["bottom"].set_color("#c9c9c6")
+        axis.spines["left"].set_color(COLORS["grid"])
+        axis.spines["right"].set_color(COLORS["grid"])
+        axis.spines["bottom"].set_color(COLORS["grid"])
 
-    fig.suptitle("比特币幂律与黄金相对强弱", y=0.965, fontsize=22, color="#595957", weight="semibold")
+    fig.suptitle("Bitcoin's Power Law", y=0.975, fontsize=22, color=COLORS["title"], weight="bold")
     fig.text(
         0.5,
-        0.93,
-        f"Coin Metrics BTC/USD · {gold_label} · 周度数据",
+        0.936,
+        f"比特币幂律与 BTC/黄金 52 周 Z-score · 数据截至 {current_date:%Y-%m-%d}",
         ha="center",
         fontsize=11,
-        color="#777774",
+        color=COLORS["subtitle"],
     )
     fig.text(
-        0.065,
-        0.025,
-        f"数据截至 {current_date:%Y-%m-%d}。模型为历史拟合，不构成价格保证或投资建议。黄金最新周收盘：{money(current_gold)} / 盎司。",
-        fontsize=9.5,
-        color="#777774",
+        0.075,
+        0.018,
+        (
+            f"数据源：Coin Metrics / Yahoo（BTC）、{gold_label}。周频数据（周日收周），本地缓存。"
+            f"最新：BTC {money(current_price)}｜中枢 {money(current_trend)}｜支撑 {money(current_support)}"
+            f"｜偏离 {current_osc:.0f}%｜Z-score {current_z:.0f}"
+        ),
+        fontsize=9,
+        color=COLORS["foot"],
     )
-    fig.subplots_adjust(left=0.07, right=0.93, top=0.90, bottom=0.08)
+    fig.subplots_adjust(left=0.075, right=0.945, top=0.90, bottom=0.075)
 
     png_path = output_dir / f"bitcoin-power-law-{current_date:%Y-%m-%d}.png"
     svg_path = output_dir / f"bitcoin-power-law-{current_date:%Y-%m-%d}.svg"
-    fig.savefig(png_path, dpi=180, bbox_inches="tight")
-    fig.savefig(svg_path, bbox_inches="tight")
+    fig.savefig(png_path, dpi=180)
+    fig.savefig(svg_path)
     plt.close(fig)
 
     return {
@@ -350,6 +417,7 @@ def draw_chart(
         "power_law_support": current_support,
         "btc_vs_power_law_pct": current_osc,
         "btc_gold_52w_zscore_pct": current_z,
+        "gold_label": gold_label,
     }
 
 

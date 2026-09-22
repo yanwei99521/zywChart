@@ -28,22 +28,26 @@ LBMA_GOLD_URL = "https://prices.lbma.org.uk/json/gold_pm.json"
 # Labels used on the rendered chart footnote, keyed by gold data source.
 GOLD_LABELS = {
     "yahoo": "Yahoo Finance COMEX Gold (GC=F)",
-    "lbma": "LBMA Gold Price PM (spot)",
+    "lbma": "LBMA Gold Price PM（USD/盎司）",
+    "cache": "黄金缓存值（最近一次成功抓取）",
 }
 
-# Last successfully fetched weekly gold series, used as a fallback when Yahoo
-# rate-limits or is unreachable so an hourly refresh can still publish a chart
-# (with fresh BTC and the most recent good gold value) instead of failing hard.
+# Last successfully fetched weekly gold series, used as a fallback when all live
+# feeds are unreachable so a refresh can still publish a chart (with fresh BTC
+# and the most recent good gold value) instead of failing hard.
 GOLD_CACHE_PATH = Path(__file__).resolve().parent.parent / "data" / "gold_cache.csv"
 
 # Source of the gold series used by the most recent fetch:
-# "yahoo" (futures GC=F, primary), "lbma" (spot fallback), "cache" (stale
+# "lbma" (spot primary), "yahoo" (futures fallback), "cache" (stale
 # last-known-good), or "" (no fetch has happened yet).
 GOLD_SOURCE = ""
 
 # Whether the most recent fetch fell back to the cached gold series. Surfaced
 # via the health endpoint so operators know the gold value may be stale.
 GOLD_STALE = False
+
+# Source of the BTC series used by the most recent fetch.
+BTC_SOURCE = ""
 
 
 def was_gold_stale() -> bool:
@@ -56,9 +60,14 @@ def gold_source() -> str:
     return GOLD_SOURCE
 
 
+def btc_source() -> str:
+    """Return the data source used by the most recent BTC fetch."""
+    return BTC_SOURCE
+
+
 def gold_label() -> str:
     """Chart footnote label describing the gold data source in use."""
-    return GOLD_LABELS.get(GOLD_SOURCE, GOLD_LABELS["yahoo"])
+    return GOLD_LABELS.get(GOLD_SOURCE, GOLD_LABELS["lbma"])
 
 
 class RefreshError(RuntimeError):
@@ -72,7 +81,7 @@ def _default_client_factory() -> AbstractContextManager[httpx.Client]:
     return httpx.Client(timeout=45.0, follow_redirects=True)
 
 
-def fetch_btc_series(
+def _fetch_btc_series_coinmetrics(
     client_factory: HttpClientFactory = _default_client_factory,
 ) -> pd.Series:
     """Fetch all available daily BTC/USD observations from Coin Metrics."""
@@ -124,6 +133,67 @@ def fetch_btc_series(
         .last()
         .dropna()
     )
+
+
+def _fetch_btc_series_yahoo() -> pd.Series:
+    """Fetch BTC/USD weekly closes from Yahoo Finance as a fallback."""
+    frame = yf.download(
+        "BTC-USD",
+        start="2010-07-18",
+        interval="1wk",
+        auto_adjust=False,
+        progress=False,
+        threads=False,
+        timeout=30,
+        multi_level_index=False,
+    )
+    if frame is None or frame.empty or "Close" not in frame.columns:
+        raise RefreshError("Yahoo Finance returned no valid BTC prices")
+
+    close = frame["Close"]
+    if isinstance(close, pd.DataFrame):
+        close = close.iloc[:, 0]
+    close = pd.to_numeric(close, errors="coerce").dropna()
+    if close.empty:
+        raise RefreshError("Yahoo Finance returned no valid BTC prices")
+
+    index = pd.DatetimeIndex(pd.to_datetime(close.index))
+    if index.tz is not None:
+        index = index.tz_convert(None)
+    close.index = index
+    close.name = "btc_usd"
+    return close.sort_index().resample("W-SUN").last().dropna()
+
+
+def fetch_btc_series(
+    client_factory: HttpClientFactory = _default_client_factory,
+) -> pd.Series:
+    """Fetch weekly BTC/USD prices, preferring Coin Metrics with Yahoo fallback.
+
+    This mirrors the reference implementation: Coin Metrics (primary) -> Yahoo
+    Finance BTC-USD weekly closes (fallback).
+    """
+    global BTC_SOURCE
+    BTC_SOURCE = ""
+    coin_error: Optional[str] = None
+
+    try:
+        series = _fetch_btc_series_coinmetrics(client_factory)
+        BTC_SOURCE = "coinmetrics"
+        return series
+    except Exception as exc:
+        coin_error = f"{type(exc).__name__}: {exc}"
+        LOGGER.warning("Coin Metrics BTC fetch failed: %s; trying Yahoo Finance", exc)
+
+    try:
+        series = _fetch_btc_series_yahoo()
+        BTC_SOURCE = "yahoo"
+        return series
+    except Exception as exc:
+        yahoo_error = f"{type(exc).__name__}: {exc}"
+        raise RefreshError(
+            f"BTC data fetch failed: Coin Metrics ({coin_error}); Yahoo ({yahoo_error})"
+        ) from exc
 
 
 def _save_gold_cache(series: pd.Series) -> None:
@@ -184,19 +254,27 @@ def fetch_gold_series_lbma(
 
 
 def fetch_gold_series(as_of: pd.Timestamp) -> pd.Series:
-    """Fetch weekly gold prices, preferring COMEX futures with LBMA fallback.
+    """Fetch weekly gold prices, preferring LBMA spot with Yahoo/cache fallback.
 
-    Source chain: Yahoo Finance GC=F futures (primary) -> LBMA Gold Price PM
-    spot (fallback) -> last-known-good cache (last resort). Yahoo frequently
-    rate-limits automated requests (HTTP 429), which makes yfinance return an
-    empty frame; LBMA is an official keyless feed that is tracked closely.
+    Source chain: LBMA Gold Price PM spot (primary) -> Yahoo Finance GC=F
+    futures (fallback) -> last-known-good cache (last resort). LBMA is an
+    official keyless feed that tracks GC=F closely and is not rate-limited.
     """
     end = (as_of + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
-    last_error: Optional[str] = None
     global GOLD_SOURCE, GOLD_STALE
     GOLD_STALE = False
     GOLD_SOURCE = ""
 
+    try:
+        lbma_weekly = fetch_gold_series_lbma()
+        if lbma_weekly is not None and not lbma_weekly.empty:
+            GOLD_SOURCE = "lbma"
+            _save_gold_cache(lbma_weekly)
+            return lbma_weekly
+    except Exception as exc:
+        LOGGER.warning("LBMA gold fetch failed: %s; trying Yahoo GC=F", exc)
+
+    last_error: Optional[str] = None
     for attempt in range(3):
         try:
             frame = yf.download(
@@ -236,35 +314,23 @@ def fetch_gold_series(as_of: pd.Timestamp) -> pd.Series:
             time.sleep(10 * (attempt + 1))  # 10s, then 20s backoff
 
     LOGGER.warning(
-        "Yahoo gold fetch failed after retries (last error: %s); trying LBMA "
-        "spot feed before falling back to the cache.",
+        "Yahoo gold fetch failed after retries (last error: %s); falling back to "
+        "cached gold series.",
         last_error,
     )
-    try:
-        lbma_weekly = fetch_gold_series_lbma()
-    except Exception as exc:
-        LOGGER.warning("LBMA gold fetch also failed: %s", exc)
-        lbma_weekly = None
-
-    if lbma_weekly is not None and not lbma_weekly.empty:
-        GOLD_SOURCE = "lbma"
-        _save_gold_cache(lbma_weekly)
-        return lbma_weekly
 
     cached = _load_gold_cache()
     if cached is not None:
         GOLD_SOURCE = "cache"
         GOLD_STALE = True
         LOGGER.warning(
-            "All gold fetches failed (Yahoo last error: %s; see log for LBMA); "
-            "using cached gold series (most recent good value) so the chart "
-            "still refreshes.",
-            last_error,
+            "All live gold fetches failed (LBMA/Yahoo); using cached gold series "
+            "(most recent good value) so the chart still refreshes."
         )
         return cached
 
     raise RefreshError(
-        f"Yahoo Finance returned no valid gold prices (last attempt: {last_error})"
+        f"No valid gold prices available (last attempt: {last_error})"
     )
 
 
@@ -296,6 +362,13 @@ def refresh_chart(
         rendered_summary = renderer(
             btc, gold, staging, effective_as_of, gold_label=gold_label()
         )
+        rendered_summary = {
+            **rendered_summary,
+            "btc_source": btc_source(),
+            "gold_source": gold_source(),
+            "gold_stale": was_gold_stale(),
+            "gold_label": gold_label(),
+        }
         (staging / "model-summary.json").write_text(
             json.dumps(rendered_summary, ensure_ascii=False, indent=2),
             encoding="utf-8",
