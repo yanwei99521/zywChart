@@ -55,6 +55,7 @@ COLORS = {
     "axis": "#70777d",
     "foot": "#8a9298",
     "legend": "#4e5962",
+    "cursor": "#5b6670",
 }
 
 # Fonts able to render the Chinese labels used throughout the chart, most
@@ -371,6 +372,28 @@ def draw_chart(
         frameon=False,
         fontsize=9.5,
         labelcolor=COLORS["legend"],
+    )
+
+    # Vertical cursor at the latest observation, spanning both panels, so the
+    # current price can be read off against the oscillator values below it.
+    for axis in (ax, ax_bottom):
+        axis.axvline(
+            current_date,
+            color=COLORS["cursor"],
+            lw=1.1,
+            ls=(0, (4, 4)),
+            zorder=6,
+        )
+    ax_bottom.annotate(
+        f"{current_date:%Y-%m-%d}",
+        xy=(current_date, OSC_LIMIT),
+        xytext=(-4, -3),
+        textcoords="offset points",
+        fontsize=9,
+        color=COLORS["cursor"],
+        ha="right",
+        va="top",
+        zorder=7,
     )
 
     for axis in (ax, ax_bottom):
