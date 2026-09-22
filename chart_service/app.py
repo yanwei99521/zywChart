@@ -25,10 +25,12 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 
 from chart_service.refresh import gold_source, refresh_chart, was_gold_stale
 from chart_service.scheduler import (
+    REFRESH_WEEKDAY,
     RUN_TIMES,
     SHANGHAI_TZ,
     RefreshState,
     run_scheduler,
+    schedule_description,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -170,8 +172,10 @@ def create_app(
                 "chart_ready": latest_png is not None,
                 "chart_updated_at": chart_updated_at,
                 "scheduler": refresh_state.as_dict(),
-                "schedule_timezone": "Asia/Shanghai",
+                "schedule_timezone": SHANGHAI_TZ,
                 "schedule_times": [f"{t.hour:02d}:{t.minute:02d}" for t in RUN_TIMES],
+                "schedule_weekday": REFRESH_WEEKDAY,
+                "schedule_description": schedule_description(),
             }
         }
 

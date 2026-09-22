@@ -102,7 +102,9 @@ def test_index_and_health_publish_schedule(tmp_path: Path) -> None:
     health = health_response.json()["data"]
     assert health["chart_ready"] is True
     assert health["schedule_timezone"] == "Asia/Shanghai"
-    assert health["schedule_times"] == [f"{hour:02d}:00" for hour in range(24)]
+    assert health["schedule_times"] == ["07:00"]
+    assert health["schedule_weekday"] == 0
+    assert health["schedule_description"] == "每周一 07:00"
 
 
 def test_invalid_summary_and_missing_data_return_503(tmp_path: Path) -> None:

@@ -16,6 +16,43 @@ import pandas as pd
 
 GENESIS = pd.Timestamp("2009-01-03")
 
+# Fonts able to render the Chinese labels used throughout the chart, most
+# preferred first. The previous list only held macOS fonts, so on Windows
+# matplotlib fell back to DejaVu Sans (no CJK glyphs) and every Chinese label
+# came out as tofu boxes / mojibake.
+CJK_FONT_CANDIDATES = (
+    "Microsoft YaHei",
+    "Microsoft YaHei UI",
+    "DengXian",
+    "SimHei",
+    "Noto Sans CJK SC",
+    "Source Han Sans SC",
+    "Noto Sans SC",
+    "WenQuanYi Zen Hei",
+    "PingFang SC",
+    "Hiragino Sans GB",
+    "Heiti SC",
+    "Arial Unicode MS",
+    "SimSun",
+    "DejaVu Sans",
+)
+
+
+def resolve_cjk_font() -> str | None:
+    """Return the first installed font that can render Chinese glyphs."""
+    try:
+        from matplotlib import font_manager
+    except Exception:  # pragma: no cover - matplotlib is always available here
+        return None
+    try:
+        available = {entry.name for entry in font_manager.fontManager.ttflist}
+    except Exception:  # pragma: no cover - defensive
+        return None
+    for name in CJK_FONT_CANDIDATES:
+        if name in available:
+            return name
+    return None
+
 
 def read_btc_coinmetrics(path: Path) -> pd.Series:
     payload = json.loads(path.read_text(encoding="utf-8"))
@@ -116,9 +153,16 @@ def draw_chart(
     data.index.name = "week_ending"
     data.to_csv(output_dir / "data" / "weekly_model_data.csv", float_format="%.8f")
 
+    chosen_font = resolve_cjk_font()
+    font_stack = ([chosen_font] if chosen_font else []) + [
+        name for name in CJK_FONT_CANDIDATES if name != chosen_font
+    ]
+    if chosen_font is None:
+        print("warning: no CJK-capable font found; Chinese labels may render as boxes")
     plt.rcParams.update(
         {
-            "font.family": ["Hiragino Sans GB", "Arial Unicode MS", "DejaVu Sans"],
+            "font.family": font_stack,
+            "font.sans-serif": list(CJK_FONT_CANDIDATES),
             "axes.unicode_minus": False,
             "figure.facecolor": "#fbfbfa",
             "axes.facecolor": "#fbfbfa",
