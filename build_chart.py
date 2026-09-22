@@ -402,7 +402,13 @@ def draw_chart(
         axis.spines["right"].set_color(COLORS["grid"])
         axis.spines["bottom"].set_color(COLORS["grid"])
 
-    fig.suptitle("Bitcoin's Power Law", y=0.975, fontsize=22, color=COLORS["title"], weight="bold")
+    fig.suptitle(
+        "Bitcoin's Power Law",
+        y=0.989,
+        fontsize=22,
+        color=COLORS["title"],
+        weight="bold",
+    )
     fig.text(
         0.5,
         0.936,
