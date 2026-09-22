@@ -7,6 +7,8 @@ import json
 import logging
 import os
 import re
+
+LOGGER = logging.getLogger(__name__)
 from collections.abc import AsyncIterator
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -16,10 +18,15 @@ from typing import Optional
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 
 from chart_service.refresh import refresh_chart
-from chart_service.scheduler import RUN_TIMES, RefreshState, run_scheduler
+from chart_service.scheduler import (
+    RUN_TIMES,
+    SHANGHAI_TZ,
+    RefreshState,
+    run_scheduler,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATED_CHART_RE = re.compile(r"bitcoin-power-law-\d{4}-\d{2}-\d{2}")
@@ -106,7 +113,7 @@ def create_app(
     application.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
-        allow_methods=["GET", "OPTIONS"],
+        allow_methods=["GET", "OPTIONS", "POST"],
         allow_headers=["*"],
     )
 
@@ -127,15 +134,31 @@ def create_app(
         return {
             "name": "Bitcoin Power Law Chart API",
             "documentation": "/docs",
+            "admin": "/admin",
             "latest_png": "/api/v1/charts/bitcoin-power-law/latest.png",
         }
 
+    @application.get("/admin", include_in_schema=False)
+    def admin_page() -> HTMLResponse:
+        """Lightweight operations console: preview the current chart and trigger
+        an on-demand refresh from the browser without touching the API docs."""
+        html_path = Path(__file__).resolve().parent / "admin_page.html"
+        html = html_path.read_text(encoding="utf-8")
+        return HTMLResponse(content=html)
+
     @application.get("/api/v1/health")
     def health() -> dict[str, object]:
+        latest_png = repository.latest_chart(".png")
+        chart_updated_at = None
+        if latest_png is not None:
+            chart_updated_at = datetime.fromtimestamp(
+                latest_png.stat().st_mtime
+            ).isoformat(timespec="seconds")
         return {
             "data": {
                 "status": "ok",
-                "chart_ready": repository.latest_chart(".png") is not None,
+                "chart_ready": latest_png is not None,
+                "chart_updated_at": chart_updated_at,
                 "scheduler": refresh_state.as_dict(),
                 "schedule_timezone": "Asia/Shanghai",
                 "schedule_times": [f"{t.hour:02d}:{t.minute:02d}" for t in RUN_TIMES],

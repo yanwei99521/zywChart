@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bitcoin Power Law · 管理后台</title>
+  <style>
+    :root {
+      --bg: #f5f7fa;
+      --card: #ffffff;
+      --ink: #1f2933;
+      --muted: #6b7280;
+      --line: #e5e7eb;
+      --brand: #f7931a;
+      --brand-ink: #ffffff;
+      --ok: #16a34a;
+      --err: #dc2626;
+      --shadow: 0 1px 3px rgba(16, 24, 40, 0.08), 0 1px 2px rgba(16, 24, 40, 0.06);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+        "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      line-height: 1.5;
+    }
+    header {
+      padding: 20px 24px;
+      background: var(--card);
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    header .dot { width: 12px; height: 12px; border-radius: 50%; background: var(--brand); }
+    header h1 { font-size: 18px; margin: 0; font-weight: 650; }
+    main { max-width: 1080px; margin: 24px auto; padding: 0 16px; display: grid; gap: 16px; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 18px 20px;
+      box-shadow: var(--shadow);
+    }
+    .card h2 { font-size: 14px; margin: 0 0 14px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+    .img-wrap { background: #0b1220; border-radius: 8px; overflow: hidden; display: flex; justify-content: center; }
+    .img-wrap img { max-width: 100%; height: auto; display: block; }
+    .meta { margin-top: 10px; color: var(--muted); font-size: 13px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+    .stat { border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
+    .stat .label { font-size: 12px; color: var(--muted); }
+    .stat .value { font-size: 14px; font-weight: 600; margin-top: 4px; word-break: break-all; }
+    .stat .value.ok { color: var(--ok); }
+    .stat .value.err { color: var(--err); }
+    .error { margin-top: 14px; background: #fef2f2; border: 1px solid #fecaca; color: var(--err); border-radius: 8px; padding: 12px 14px; font-size: 13px; white-space: pre-wrap; }
+    .hidden { display: none; }
+    .actions { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+    button {
+      background: var(--brand);
+      color: var(--brand-ink);
+      border: none;
+      border-radius: 8px;
+      padding: 11px 20px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity .15s ease;
+    }
+    button:disabled { opacity: .55; cursor: not-allowed; }
+    .busy { color: var(--muted); font-size: 13px; }
+    .hint { color: var(--muted); font-size: 12px; margin: 0 4px; }
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+    .pill.ok { background: #dcfce7; color: var(--ok); }
+    .pill.no { background: #fee2e2; color: var(--err); }
+  </style>
+</head>
+<body>
+  <header>
+    <span class="dot"></span>
+    <h1>Bitcoin Power Law · 管理后台</h1>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2>当前图表</h2>
+      <div class="img-wrap">
+        <img id="chart" alt="Bitcoin power-law chart" />
+      </div>
+      <div class="meta" id="chart-meta">加载中…</div>
+    </section>
+
+    <section class="card">
+      <h2>刷新状态</h2>
+      <div class="grid" id="status-grid"></div>
+      <div id="error-box" class="error hidden"></div>
+    </section>
+
+    <section class="card actions">
+      <button id="refresh-btn">强制刷新数据并重绘</button>
+      <span class="busy" id="busy"></span>
+      <span class="hint">点击后立即拉取 BTC + 黄金最新数据并重绘，无需等待整点定时任务。</span>
+    </section>
+
+    <p class="hint">
+      说明：该后台页面不鉴权，当前仅适合在本地 / 内网访问。若服务暴露至公网，请为
+      <code>/admin</code> 与 <code>/refresh</code> 增加访问控制。图表由定时任务每小时整点（Asia/Shanghai）自动刷新。
+    </p>
+  </main>
+
+  <script>
+    const IMG = "/api/v1/charts/bitcoin-power-law/latest.png";
+    const HEALTH = "/api/v1/health";
+    const REFRESH = "/api/v1/charts/bitcoin-power-law/refresh";
+
+    const chartEl = document.getElementById("chart");
+    const chartMeta = document.getElementById("chart-meta");
+    const grid = document.getElementById("status-grid");
+    const errorBox = document.getElementById("error-box");
+    const btn = document.getElementById("refresh-btn");
+    const busy = document.getElementById("busy");
+
+    function fmt(ts) {
+      if (!ts) return "—";
+      const d = new Date(ts);
+      if (isNaN(d.getTime())) return ts;
+      const p = (n) => String(n).padStart(2, "0");
+      return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ` +
+             `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+    }
+
+    function setChart() {
+      const url = IMG + "?t=" + Date.now();
+      chartEl.onload = () => { chartMeta.textContent = "已加载最新图表（URL 已带时间戳防缓存）"; };
+      chartEl.onerror = () => { chartMeta.textContent = "图表尚未生成或加载失败。"; };
+      chartEl.src = url;
+    }
+
+    function stat(label, value, cls) {
+      const clsAttr = cls ? ` class="${cls}"` : "";
+      return `<div class="stat"><div class="label">${label}</div>` +
+             `<div class="value${clsAttr}">${value ?? "—"}</div></div>`;
+    }
+
+    async function loadStatus() {
+      try {
+        const res = await fetch(HEALTH, { cache: "no-store" });
+        const j = await res.json();
+        const d = j.data || {};
+        const ready = !!d.chart_ready;
+        let html = "";
+        html += stat("图表就绪", ready
+          ? `<span class="pill ok">已就绪</span>`
+          : `<span class="pill no">未就绪</span>`);
+        html += stat("图最后生成", fmt(d.chart_updated_at));
+        html += stat("最后成功刷新", fmt(d.scheduler && d.scheduler.last_success_at));
+        html += stat("最后尝试", fmt(d.scheduler && d.scheduler.last_attempt_at));
+        html += stat("下次定时刷新", fmt(d.scheduler && d.scheduler.next_run_at));
+        html += stat("刷新频率", "每小时整点（Asia/Shanghai）");
+        grid.innerHTML = html;
+
+        const err = d.scheduler && d.scheduler.last_error;
+        if (err) {
+          errorBox.textContent = "最近一次刷新错误：\n" + err;
+          errorBox.classList.remove("hidden");
+        } else {
+          errorBox.classList.add("hidden");
+        }
+        return ready;
+      } catch (e) {
+        grid.innerHTML = stat("状态获取失败", String(e), "err");
+        return false;
+      }
+    }
+
+    async function doRefresh() {
+      btn.disabled = true;
+      busy.textContent = "刷新中…（拉取 BTC + 黄金数据并重绘，请稍候）";
+      errorBox.classList.add("hidden");
+      try {
+        const res = await fetch(REFRESH, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        });
+        const j = await res.json().catch(() => ({}));
+        if (res.ok && j.data && j.data.refreshed) {
+          busy.textContent = "刷新成功 ✓";
+        } else {
+          const msg = (j.error && j.error.message) || ("HTTP " + res.status);
+          throw new Error(msg);
+        }
+      } catch (e) {
+        busy.textContent = "";
+        errorBox.textContent = "强制刷新失败：\n" + (e && e.message ? e.message : e);
+        errorBox.classList.remove("hidden");
+      } finally {
+        btn.disabled = false;
+        await loadStatus();
+        setChart();
+        if (busy.textContent === "刷新中…（拉取 BTC + 黄金数据并重绘，请稍候）") {
+          busy.textContent = "";
+        }
+        setTimeout(() => { if (busy.textContent === "刷新成功 ✓") busy.textContent = ""; }, 4000);
+      }
+    }
+
+    btn.addEventListener("click", doRefresh);
+    (async () => {
+      await loadStatus();
+      setChart();
+      setInterval(loadStatus, 30000); // 每 30s 自动刷新状态（不重载图）
+    })();
+  </script>
+</body>
+</html>
