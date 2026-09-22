@@ -75,7 +75,13 @@ def cycle_extreme(series: pd.Series, start: str, end: str, kind: str) -> tuple[p
     return when, float(window.loc[when])
 
 
-def draw_chart(btc: pd.Series, gold: pd.Series, output_dir: Path, as_of: pd.Timestamp) -> dict[str, float]:
+def draw_chart(
+    btc: pd.Series,
+    gold: pd.Series,
+    output_dir: Path,
+    as_of: pd.Timestamp,
+    gold_label: str = "Yahoo Finance COMEX Gold (GC=F)",
+) -> dict[str, float]:
     btc = btc.loc[:as_of]
     gold = gold.loc[:as_of]
     slope, intercept = power_law_fit(btc)
@@ -270,7 +276,7 @@ def draw_chart(btc: pd.Series, gold: pd.Series, output_dir: Path, as_of: pd.Time
     fig.text(
         0.5,
         0.93,
-        "Coin Metrics BTC/USD · Yahoo Finance COMEX Gold (GC=F) · 周度数据",
+        f"Coin Metrics BTC/USD · {gold_label} · 周度数据",
         ha="center",
         fontsize=11,
         color="#777774",

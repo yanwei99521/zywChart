@@ -14,21 +14,25 @@ def local_time(hour: int, minute: int = 0) -> datetime:
     return datetime(2026, 9, 20, hour, minute, tzinfo=ZoneInfo(SHANGHAI_TZ))
 
 
-def test_before_morning_run_schedules_0700() -> None:
+def test_before_morning_run_schedules_next_hour() -> None:
     assert next_scheduled_time(local_time(6, 59)) == local_time(7)
 
 
-def test_after_morning_run_schedules_1800() -> None:
-    assert next_scheduled_time(local_time(7, 1)) == local_time(18)
+def test_after_the_hour_schedules_next_hour() -> None:
+    assert next_scheduled_time(local_time(7, 1)) == local_time(8)
 
 
 def test_exact_schedule_time_moves_to_next_slot() -> None:
-    assert next_scheduled_time(local_time(7)) == local_time(18)
+    assert next_scheduled_time(local_time(7)) == local_time(8)
 
 
-def test_after_evening_run_schedules_next_day_morning() -> None:
-    assert next_scheduled_time(local_time(18, 1)) == datetime(
-        2026, 9, 21, 7, 0, tzinfo=ZoneInfo(SHANGHAI_TZ)
+def test_after_evening_run_schedules_next_hour() -> None:
+    assert next_scheduled_time(local_time(18, 1)) == local_time(19)
+
+
+def test_late_night_rolls_to_next_day() -> None:
+    assert next_scheduled_time(local_time(23, 1)) == datetime(
+        2026, 9, 21, 0, 0, tzinfo=ZoneInfo(SHANGHAI_TZ)
     )
 
 

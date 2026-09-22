@@ -23,10 +23,23 @@ COIN_METRICS_URL = (
     "https://community-api.coinmetrics.io/v4/timeseries/asset-metrics"
 )
 
+LBMA_GOLD_URL = "https://prices.lbma.org.uk/json/gold_pm.json"
+
+# Labels used on the rendered chart footnote, keyed by gold data source.
+GOLD_LABELS = {
+    "yahoo": "Yahoo Finance COMEX Gold (GC=F)",
+    "lbma": "LBMA Gold Price PM (spot)",
+}
+
 # Last successfully fetched weekly gold series, used as a fallback when Yahoo
 # rate-limits or is unreachable so an hourly refresh can still publish a chart
 # (with fresh BTC and the most recent good gold value) instead of failing hard.
 GOLD_CACHE_PATH = Path(__file__).resolve().parent.parent / "data" / "gold_cache.csv"
+
+# Source of the gold series used by the most recent fetch:
+# "yahoo" (futures GC=F, primary), "lbma" (spot fallback), "cache" (stale
+# last-known-good), or "" (no fetch has happened yet).
+GOLD_SOURCE = ""
 
 # Whether the most recent fetch fell back to the cached gold series. Surfaced
 # via the health endpoint so operators know the gold value may be stale.
@@ -36,6 +49,16 @@ GOLD_STALE = False
 def was_gold_stale() -> bool:
     """Return True if the last successful refresh used cached gold data."""
     return GOLD_STALE
+
+
+def gold_source() -> str:
+    """Return the data source used by the most recent gold fetch."""
+    return GOLD_SOURCE
+
+
+def gold_label() -> str:
+    """Chart footnote label describing the gold data source in use."""
+    return GOLD_LABELS.get(GOLD_SOURCE, GOLD_LABELS["yahoo"])
 
 
 class RefreshError(RuntimeError):
@@ -125,18 +148,54 @@ def _load_gold_cache() -> Optional[pd.Series]:
     return None
 
 
-def fetch_gold_series(as_of: pd.Timestamp) -> pd.Series:
-    """Fetch COMEX gold futures daily closes and convert them to weekly data.
+def fetch_gold_series_lbma(
+    client_factory: HttpClientFactory = _default_client_factory,
+) -> pd.Series:
+    """Fetch the LBMA Gold Price PM (USD) fixings as a weekly series.
 
-    Yahoo frequently rate-limits automated requests (HTTP 429), which makes
-    yfinance return an empty frame. We retry with backoff, and if every attempt
-    fails we fall back to the last successfully fetched gold series (cached on
-    disk) so the chart still refreshes with fresh BTC instead of getting stuck.
+    Official, keyless JSON feed dating back to 1968; used as the fallback when
+    Yahoo Finance (GC=F futures) is rate-limited or unreachable. Values are
+    spot fixings, so they track GC=F closely but are not identical.
+    """
+    with client_factory() as client:
+        response = client.get(LBMA_GOLD_URL)
+        response.raise_for_status()
+        rows = response.json()
+    if not isinstance(rows, list) or not rows:
+        raise RefreshError("LBMA returned no gold prices")
+
+    records = []
+    for row in rows:
+        date = row.get("d")
+        values = row.get("v") or []
+        if not date or not values or values[0] is None:
+            continue
+        records.append((pd.Timestamp(date), float(values[0])))
+    if not records:
+        raise RefreshError("LBMA returned no gold prices")
+
+    close = pd.Series(
+        pd.to_numeric([value for _, value in records], errors="coerce"),
+        index=pd.DatetimeIndex([date for date, _ in records]),
+    ).dropna()
+    close = close[~close.index.duplicated(keep="last")].sort_index()
+    close.name = "gold_usd_oz"
+    return close.resample("W-SUN").last().dropna()
+
+
+def fetch_gold_series(as_of: pd.Timestamp) -> pd.Series:
+    """Fetch weekly gold prices, preferring COMEX futures with LBMA fallback.
+
+    Source chain: Yahoo Finance GC=F futures (primary) -> LBMA Gold Price PM
+    spot (fallback) -> last-known-good cache (last resort). Yahoo frequently
+    rate-limits automated requests (HTTP 429), which makes yfinance return an
+    empty frame; LBMA is an official keyless feed that is tracked closely.
     """
     end = (as_of + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
     last_error: Optional[str] = None
-    global GOLD_STALE
+    global GOLD_SOURCE, GOLD_STALE
     GOLD_STALE = False
+    GOLD_SOURCE = ""
 
     for attempt in range(3):
         try:
@@ -164,6 +223,7 @@ def fetch_gold_series(as_of: pd.Timestamp) -> pd.Series:
                     close.name = "gold_usd_oz"
                     weekly = close.sort_index().resample("W-SUN").last().dropna()
                     if not weekly.empty:
+                        GOLD_SOURCE = "yahoo"
                         _save_gold_cache(weekly)
                         return weekly
                 last_error = "Yahoo returned a frame with no usable Close prices"
@@ -175,12 +235,30 @@ def fetch_gold_series(as_of: pd.Timestamp) -> pd.Series:
         if attempt < 2:
             time.sleep(10 * (attempt + 1))  # 10s, then 20s backoff
 
+    LOGGER.warning(
+        "Yahoo gold fetch failed after retries (last error: %s); trying LBMA "
+        "spot feed before falling back to the cache.",
+        last_error,
+    )
+    try:
+        lbma_weekly = fetch_gold_series_lbma()
+    except Exception as exc:
+        LOGGER.warning("LBMA gold fetch also failed: %s", exc)
+        lbma_weekly = None
+
+    if lbma_weekly is not None and not lbma_weekly.empty:
+        GOLD_SOURCE = "lbma"
+        _save_gold_cache(lbma_weekly)
+        return lbma_weekly
+
     cached = _load_gold_cache()
     if cached is not None:
+        GOLD_SOURCE = "cache"
         GOLD_STALE = True
         LOGGER.warning(
-            "Gold fetch failed after retries (last error: %s); using cached "
-            "gold series (most recent good value) so the chart still refreshes.",
+            "All gold fetches failed (Yahoo last error: %s; see log for LBMA); "
+            "using cached gold series (most recent good value) so the chart "
+            "still refreshes.",
             last_error,
         )
         return cached
@@ -190,9 +268,7 @@ def fetch_gold_series(as_of: pd.Timestamp) -> pd.Series:
     )
 
 
-Renderer = Callable[
-    [pd.Series, pd.Series, Path, pd.Timestamp], dict[str, object]
-]
+Renderer = Callable[..., dict[str, object]]
 
 
 def refresh_chart(
@@ -217,7 +293,9 @@ def refresh_chart(
     ) as temporary:
         staging = Path(temporary)
         (staging / "data").mkdir()
-        rendered_summary = renderer(btc, gold, staging, effective_as_of)
+        rendered_summary = renderer(
+            btc, gold, staging, effective_as_of, gold_label=gold_label()
+        )
         (staging / "model-summary.json").write_text(
             json.dumps(rendered_summary, ensure_ascii=False, indent=2),
             encoding="utf-8",

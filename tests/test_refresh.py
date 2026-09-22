@@ -73,12 +73,15 @@ def test_fetch_btc_series_rejects_empty_data() -> None:
         fetch_btc_series(client_factory=lambda: client)
 
 
-def test_fetch_gold_series_converts_daily_close_to_weekly(monkeypatch) -> None:
+def test_fetch_gold_series_converts_daily_close_to_weekly(
+    monkeypatch, tmp_path: Path
+) -> None:
     daily = pd.DataFrame(
         {"Close": [100.0, 110.0]},
         index=pd.DatetimeIndex(["2026-09-18", "2026-09-19"], tz="UTC"),
     )
     monkeypatch.setattr("chart_service.refresh.yf.download", lambda *_a, **_k: daily)
+    monkeypatch.setattr("chart_service.refresh.GOLD_CACHE_PATH", tmp_path / "cache.csv")
 
     result = fetch_gold_series(pd.Timestamp("2026-09-20"))
 
@@ -86,13 +89,66 @@ def test_fetch_gold_series_converts_daily_close_to_weekly(monkeypatch) -> None:
     assert result.index.tz is None
 
 
-def test_fetch_gold_series_rejects_empty_download(monkeypatch) -> None:
+def test_fetch_gold_series_rejects_empty_download(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         "chart_service.refresh.yf.download", lambda *_a, **_k: pd.DataFrame()
     )
+    monkeypatch.setattr("chart_service.refresh.time.sleep", lambda *_a: None)
+    monkeypatch.setattr(
+        "chart_service.refresh.fetch_gold_series_lbma",
+        lambda *a, **k: (_ for _ in ()).throw(RefreshError("LBMA down")),
+    )
+    monkeypatch.setattr("chart_service.refresh.GOLD_CACHE_PATH", tmp_path / "cache.csv")
 
     with pytest.raises(RefreshError, match="no valid gold prices"):
         fetch_gold_series(pd.Timestamp("2026-09-20"))
+
+
+def test_fetch_gold_series_falls_back_to_lbma(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        "chart_service.refresh.yf.download", lambda *_a, **_k: pd.DataFrame()
+    )
+    monkeypatch.setattr("chart_service.refresh.time.sleep", lambda *_a: None)
+    monkeypatch.setattr(
+        "chart_service.refresh.GOLD_CACHE_PATH", tmp_path / "cache.csv"
+    )
+
+    def fake_lbma() -> pd.Series:
+        daily = pd.Series(
+            [4000.0, 4100.0],
+            index=pd.DatetimeIndex(["2026-09-18", "2026-09-19"]),
+            name="gold_usd_oz",
+        )
+        return daily.resample("W-SUN").last().dropna()
+
+    monkeypatch.setattr(
+        "chart_service.refresh.fetch_gold_series_lbma", lambda *a, **k: fake_lbma()
+    )
+
+    result = fetch_gold_series(pd.Timestamp("2026-09-20"))
+
+    assert result.iloc[-1] == 4100.0
+
+
+def test_fetch_gold_series_falls_back_to_cache(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        "chart_service.refresh.yf.download", lambda *_a, **_k: pd.DataFrame()
+    )
+    monkeypatch.setattr("chart_service.refresh.time.sleep", lambda *_a: None)
+    monkeypatch.setattr(
+        "chart_service.refresh.fetch_gold_series_lbma",
+        lambda *a, **k: (_ for _ in ()).throw(RefreshError("LBMA down")),
+    )
+    cache = tmp_path / "cache.csv"
+    cached = pd.Series(
+        [4200.0], index=pd.DatetimeIndex([pd.Timestamp("2026-09-20")]), name="gold_usd_oz"
+    )
+    cached.to_csv(cache, header=True)
+    monkeypatch.setattr("chart_service.refresh.GOLD_CACHE_PATH", cache)
+
+    result = fetch_gold_series(pd.Timestamp("2026-09-20"))
+
+    assert result.iloc[-1] == 4200.0
 
 
 def test_refresh_publishes_complete_output_only_after_render_succeeds(
@@ -110,6 +166,7 @@ def test_refresh_publishes_complete_output_only_after_render_succeeds(
         _gold: pd.Series,
         output_dir: Path,
         _as_of: pd.Timestamp,
+        **_kwargs: object,
     ) -> dict[str, float]:
         (output_dir / "data").mkdir(exist_ok=True)
         (output_dir / "bitcoin-power-law-2026-09-20.png").write_bytes(b"new")

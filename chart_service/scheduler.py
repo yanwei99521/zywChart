@@ -23,6 +23,7 @@ class RefreshState:
     last_success_at: Optional[str] = None
     last_error: Optional[str] = None
     gold_stale: Optional[bool] = None
+    gold_source: Optional[str] = None
     next_run_at: Optional[str] = None
 
     def as_dict(self) -> dict[str, Optional[str]]:
