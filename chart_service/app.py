@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 from collections.abc import AsyncIterator
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
@@ -16,7 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 
 from chart_service.refresh import refresh_chart
-from chart_service.scheduler import RefreshState, run_scheduler
+from chart_service.scheduler import RUN_TIMES, RefreshState, run_scheduler
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATED_CHART_RE = re.compile(r"bitcoin-power-law-\d{4}-\d{2}-\d{2}")
@@ -46,6 +49,21 @@ class ChartRepository:
         return self.root / "data" / "weekly_model_data.csv"
 
 
+def _needs_refresh(repository: "ChartRepository", max_age_hours: int = 6) -> bool:
+    """Refresh on startup when no chart exists or the cached one is stale.
+
+    The scheduler only ticks at 07:00/18:00 Shanghai time, so a service that
+    starts between slots (or after a reboot) would otherwise serve an
+    arbitrarily old PNG until the next slot. This forces a fresh pull on boot
+    whenever the published chart is older than ``max_age_hours``.
+    """
+    latest = repository.latest_chart(".png")
+    if latest is None:
+        return True
+    mtime = datetime.fromtimestamp(latest.stat().st_mtime)
+    return (datetime.now() - mtime) > timedelta(hours=max_age_hours)
+
+
 def unavailable(message: str) -> JSONResponse:
     return JSONResponse(
         status_code=503,
@@ -67,7 +85,7 @@ def create_app(
                 run_scheduler(
                     lambda: refresh_chart(repository.root),
                     refresh_state,
-                    run_immediately=repository.latest_chart(".png") is None,
+                    run_immediately=_needs_refresh(repository),
                 )
             )
         try:
@@ -120,7 +138,7 @@ def create_app(
                 "chart_ready": repository.latest_chart(".png") is not None,
                 "scheduler": refresh_state.as_dict(),
                 "schedule_timezone": "Asia/Shanghai",
-                "schedule_times": ["07:00", "18:00"],
+                "schedule_times": [f"{t.hour:02d}:{t.minute:02d}" for t in RUN_TIMES],
             }
         }
 
@@ -150,6 +168,39 @@ def create_app(
             media_type="text/csv; charset=utf-8",
             filename="bitcoin-power-law-weekly-data.csv",
             content_disposition_type="attachment",
+            headers=CACHE_HEADERS,
+        )
+
+    @application.post("/api/v1/charts/bitcoin-power-law/refresh")
+    async def trigger_refresh() -> JSONResponse:
+        """Manually fetch source data and regenerate the chart on demand.
+
+        Runs in a worker thread so the event loop stays responsive. State is
+        recorded in ``refresh_state`` so /health reflects the manual run. Use
+        this when you don't want to wait for the next hourly slot.
+        """
+        attempted_at = datetime.now(ZoneInfo(SHANGHAI_TZ)).isoformat()
+        refresh_state.last_attempt_at = attempted_at
+        try:
+            result = await asyncio.to_thread(refresh_chart, repository.root)
+        except Exception as error:  # Keep the service alive on upstream failure.
+            refresh_state.last_error = f"{type(error).__name__}: {error}"
+            LOGGER.warning("Manual chart refresh failed: %s", error)
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "error": {
+                        "code": "refresh_failed",
+                        "message": str(error),
+                        "attempted_at": attempted_at,
+                    }
+                },
+                headers=CACHE_HEADERS,
+            )
+        refresh_state.last_success_at = datetime.now(ZoneInfo(SHANGHAI_TZ)).isoformat()
+        refresh_state.last_error = None
+        return JSONResponse(
+            content={"data": {"refreshed": True, "summary": result}},
             headers=CACHE_HEADERS,
         )
 

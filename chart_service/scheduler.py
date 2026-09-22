@@ -10,7 +10,8 @@ from typing import Callable, Optional
 from zoneinfo import ZoneInfo
 
 SHANGHAI_TZ = "Asia/Shanghai"
-RUN_TIMES = (time(7, 0), time(18, 0))
+# Refresh once per hour, on the hour (Asia/Shanghai).
+RUN_TIMES = tuple(time(hour, 0) for hour in range(24))
 LOGGER = logging.getLogger(__name__)
 
 
@@ -28,7 +29,7 @@ class RefreshState:
 
 
 def next_scheduled_time(now: datetime) -> datetime:
-    """Return the next 07:00 or 18:00 occurrence in Asia/Shanghai."""
+    """Return the next on-the-hour occurrence in Asia/Shanghai."""
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
     local_now = now.astimezone(ZoneInfo(SHANGHAI_TZ))
